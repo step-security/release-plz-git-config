@@ -1,0 +1,100 @@
+name: "git-config-from-token"
+author: "step-security"
+description: "Configure the git user corresponding to the `GITHUB_TOKEN` environment variable."
+branding:
+  icon: "zap"
+  color: "yellow"
+outputs:
+  name:
+    description: "Git author name"
+    value: ${{ steps.git-author.outputs.name }}
+  email:
+    description: "Git author email"
+    value: ${{ steps.git-author.outputs.email }}
+runs:
+  using: "composite"
+  steps:
+    - name: Subscription check
+      shell: bash
+      env:
+        REPO_PRIVATE: ${{ github.event.repository.private }}
+      run: |
+        UPSTREAM="release-plz/git-config"
+        ACTION_REPO="${GITHUB_ACTION_REPOSITORY:-}"
+        DOCS_URL="https://docs.stepsecurity.io/actions/stepsecurity-maintained-actions"
+
+        echo ""
+        echo -e "\033[1;36mStepSecurity Maintained Action\033[0m"
+        echo "Secure drop-in replacement for $UPSTREAM"
+        if [ "$REPO_PRIVATE" = "false" ]; then
+          echo -e "\033[32m✓ Free for public repositories\033[0m"
+        fi
+        echo -e "\033[36mLearn more:\033[0m $DOCS_URL"
+        echo ""
+
+        if [ "$REPO_PRIVATE" != "false" ]; then
+          SERVER_URL="${GITHUB_SERVER_URL:-https://github.com}"
+
+          if [ "$SERVER_URL" != "https://github.com" ]; then
+            BODY=$(printf '{"action":"%s","ghes_server":"%s"}' "$ACTION_REPO" "$SERVER_URL")
+          else
+            BODY=$(printf '{"action":"%s"}' "$ACTION_REPO")
+          fi
+
+          API_URL="https://agent.api.stepsecurity.io/v1/github/$GITHUB_REPOSITORY/actions/maintained-actions-subscription"
+
+          RESPONSE=$(curl --max-time 3 -s -w "%{http_code}" \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -d "$BODY" \
+            "$API_URL" -o /dev/null) && CURL_EXIT_CODE=0 || CURL_EXIT_CODE=$?
+
+          if [ $CURL_EXIT_CODE -ne 0 ]; then
+            echo "Timeout or API not reachable. Continuing to next step."
+          elif [ "$RESPONSE" = "403" ]; then
+            echo -e "::error::\033[1;31mThis action requires a StepSecurity subscription for private repositories.\033[0m"
+            echo -e "::error::\033[31mLearn how to enable a subscription: $DOCS_URL\033[0m"
+            exit 1
+          fi
+        fi
+
+    - id: git-author
+      name: Determine Git user info from GitHub token
+      shell: bash
+      run: |
+        if [ -z "${GITHUB_TOKEN+x}" ]; then
+          echo "Error: environment variable GITHUB_TOKEN is undefined"
+          exit 1
+        fi
+
+        if [ -z "$GITHUB_TOKEN" ]; then
+          echo "Error: environment variable GITHUB_TOKEN is empty"
+          exit 1
+        fi
+
+        if ! command -v gh &>/dev/null; then
+          echo "Error: 'gh' CLI is not installed on this runner"
+          exit 1
+        fi
+
+        if ! command -v jq &>/dev/null; then
+          echo "Error: 'jq' is not installed on this runner"
+          exit 1
+        fi
+
+        # The environment variable GITHUB_TOKEN is read by the `gh` cli
+        VIEWER_JSON=$(gh api graphql -f query='query { viewer { name login databaseId }}' --jq '.data.viewer')
+        VIEWER_NAME=$(jq --raw-output '.name | values' <<< "${VIEWER_JSON}")
+        VIEWER_LOGIN=$(jq --raw-output '.login' <<< "${VIEWER_JSON}")
+        VIEWER_DATABASE_ID=$(jq --raw-output '.databaseId' <<< "${VIEWER_JSON}")
+
+        # Set the variable USER_NAME to the value of VIEWER_NAME if VIEWER_NAME is set and not null.
+        # Otherwise, set USER_NAME to the value of VIEWER_LOGIN.
+        USER_NAME="${VIEWER_NAME:-${VIEWER_LOGIN}}"
+        USER_EMAIL="${VIEWER_DATABASE_ID}+${VIEWER_LOGIN}@users.noreply.github.com"
+
+        git config --global user.name "${USER_NAME}"
+        git config --global user.email "${USER_EMAIL}"
+
+        echo "name=${USER_NAME}" >> "${GITHUB_OUTPUT}"
+        echo "email=${USER_EMAIL}" >> "${GITHUB_OUTPUT}"
